@@ -1,0 +1,1357 @@
+import { useMemo, ReactNode, useState } from 'react';
+import { motion, AnimatePresence } from 'motion/react';
+import { format, startOfMonth, endOfMonth, isWithinInterval } from 'date-fns';
+import {
+  TrendingUp, 
+  TrendingDown, 
+  Wallet, 
+  CheckCircle2, 
+  AlertCircle,
+  Target,
+  Fuel,
+  Car,
+  ChevronRight,
+  Info,
+  Share2,
+  Sparkles,
+  PlusCircle,
+  X,
+  Edit3,
+  Sliders,
+  DollarSign,
+  Check,
+  RotateCcw,
+  Zap,
+  ArrowUpRight
+} from 'lucide-react';
+import { cn, parseEntryDate } from '../lib/utils';
+import { Entry, FixedCost, MaintenanceInterval } from '../types';
+import { getCategoryStyle } from '../lib/category-styles';
+import { getAllEmptyTankCycles } from '../lib/fuel-calculator';
+import PWAInstallButton from './PWAInstallButton';
+
+interface DashboardProps {
+  totals: {
+    earnings: number;
+    expenses: number;
+    totalFixedCosts: number;
+    balance: number;
+    progress: number;
+    balanceToPay: number;
+    dailyExpenses: number;
+    todayEarnings: number;
+    todayExpenses: number;
+    paidFixedCostsDetails: { item: string; valor: number; data: string }[];
+    paidFixedCostsSum: number;
+    unpaidFixedCosts: string[];
+    fixedCostPaymentIds: string[];
+  };
+  fixedCosts: FixedCost[];
+  nextOilChange: number | null;
+  currentKm: number;
+  targetKm: number;
+  dailyEarningGoal?: number;
+  onUpdateDailyEarningGoal?: (goal: number) => Promise<void> | void;
+  maintenanceIntervals: MaintenanceInterval[];
+  entries: Entry[];
+  categories: { id: string; nome: string }[];
+  earningCategories: { id: string; nome: string }[];
+  onViewMaintenance: () => void;
+  onOpenAIStudio: () => void;
+  isAdmin?: boolean;
+  uniqueVisitors?: number;
+  email?: string;
+}
+
+export default function Dashboard({ 
+  totals, 
+  fixedCosts, 
+  nextOilChange, 
+  currentKm, 
+  targetKm,
+  dailyEarningGoal,
+  onUpdateDailyEarningGoal,
+  maintenanceIntervals,
+  entries,
+  categories,
+  onViewMaintenance,
+  onOpenAIStudio,
+  isAdmin,
+  uniqueVisitors,
+  email,
+  earningCategories
+}: DashboardProps) {
+  const [showDetails, setShowDetails] = useState(false);
+  const [showBurdenDetails, setShowBurdenDetails] = useState(false);
+  const [showPaidDetails, setShowPaidDetails] = useState(false);
+  const [modalType, setModalType] = useState<'ganhos' | 'despesas' | null>(null);
+  const [isGoalModalOpen, setIsGoalModalOpen] = useState(false);
+  const [goalInput, setGoalInput] = useState<string>('');
+  const [isSavingGoal, setIsSavingGoal] = useState(false);
+  const [saveGoalSuccess, setSaveGoalSuccess] = useState(false);
+  const [taxResult, setTaxResult] = useState<string | null>(null);
+  const currentMonthStr = format(new Date(), 'yyyy-MM');
+  const currentMonthAlt = format(new Date(), 'yyyy/MM');
+  const isNewUser = fixedCosts.length === 0 && entries.length === 0;
+  
+  const detailsList = useMemo(() => {
+    if (!modalType) return [];
+    const filtered = entries.filter(e => {
+        const entryDateInfo = parseEntryDate(e.data);
+        const start = startOfMonth(new Date());
+        const end = endOfMonth(new Date());
+        const isCurrentMonth = isWithinInterval(entryDateInfo, { start, end });
+        const isExpense = e.tipo === 'Despesa';
+        const isEarning = e.tipo === 'Ganhos';
+        
+        if (modalType === 'ganhos') return isCurrentMonth && isEarning;
+        
+        // For 'despesas', filter out entries that are identified as fixed cost payments
+        if (modalType === 'despesas') {
+            return isCurrentMonth && isExpense && !totals.fixedCostPaymentIds.includes(e.id);
+        }
+        
+        return false;
+    });
+    
+    const grouped = filtered.reduce((acc, curr) => {
+        if (modalType === 'ganhos' && curr.ganhos) {
+            Object.entries(curr.ganhos).forEach(([id, valor]) => {
+                const catName = earningCategories.find(c => c.id === id)?.nome || 'Outros Ganhos';
+                acc[catName] = (acc[catName] || 0) + valor;
+            });
+        } else {
+            const cat = categories.find(c => c.id === curr.categoriaId)?.nome || (curr.tipo === 'Ganhos' ? 'Outros Ganhos' : 'Outros');
+            acc[cat] = (acc[cat] || 0) + curr.valor;
+        }
+        return acc;
+    }, {} as Record<string, number>);
+    
+    return Object.entries(grouped)
+      .map(([name, total]) => ({ name, total }))
+      .sort((a, b) => b.total - a.total);
+  }, [entries, modalType, currentMonthAlt, categories]);
+  
+  const activeFixedCosts = useMemo(() => {
+    return fixedCosts.filter(fc => {
+      const start = fc.dataInicio || '0000-00';
+      const end = fc.dataFim || '9999-12';
+      return currentMonthStr >= start && currentMonthStr <= end;
+    });
+  }, [fixedCosts, currentMonthStr]);
+
+  const fixedCostDetails = useMemo(() => {
+    let savings = 0;
+    const pending: { item: string; valor: number }[] = [];
+
+    activeFixedCosts.forEach(fc => {
+      const payments = totals.paidFixedCostsDetails.filter(p => p.item.toLowerCase() === fc.item.toLowerCase());
+      const paidSum = payments.reduce((acc, p) => acc + p.valor, 0);
+      
+      // Se não há nenhum pagamento nesse item, ele está 100% pendente
+      if (payments.length === 0) {
+        pending.push({ item: fc.item, valor: fc.valorMensal });
+      } else {
+        // Se já foi pago algo mas pagou menos, o restante é considerado economia/desconto
+        const diff = fc.valorMensal - paidSum;
+        if (diff > 0) {
+          savings += diff;
+        }
+      }
+    });
+
+    return { pending, savings };
+  }, [activeFixedCosts, totals.paidFixedCostsDetails]);
+
+  const totalPendingFixedCosts = useMemo(() => {
+    return fixedCostDetails.pending.reduce((acc, p) => acc + p.valor, 0);
+  }, [fixedCostDetails]);
+
+  const dailyWorkBurden = useMemo(() => {
+    // Already filtered by current month in App.tsx totals calculation, but Dashboard gets ALL entries
+    // Need to filter locally here to only count days in the current month
+    const start = startOfMonth(new Date());
+    const end = endOfMonth(new Date());
+    
+    const currentMonthEntries = entries.filter(e => {
+        const date = parseEntryDate(e.data);
+        return isWithinInterval(date, { start, end });
+    });
+
+    const workedDays = new Set(
+      currentMonthEntries.filter(e => e.tipo === 'Ganhos').map(e => e.data)
+    ).size;
+    if (workedDays === 0) return null;
+
+    // Custo Médio = (Custos Fixos Pendentes + Despesas de Rua) / dias trabalhados
+    const dailyExpenses = totals.dailyExpenses || 0;
+    
+    const remainingFixedCosts = totalPendingFixedCosts;
+    const totalObligations = remainingFixedCosts + dailyExpenses;
+    
+    return {
+      burden: workedDays > 0 ? totalObligations / workedDays : 0,
+      days: workedDays
+    };
+  }, [entries, totals, totalPendingFixedCosts]);
+
+  const statusMessage = useMemo(() => {
+    if (totals.progress >= 100) {
+      return { 
+        text: "Lucro real liberado!", 
+        icon: <CheckCircle2 className="text-emerald-500" /> 
+      };
+    }
+    
+    if (totals.unpaidFixedCosts && totals.unpaidFixedCosts.length > 0) {
+      return {
+        text: `Pendentes: ${totals.unpaidFixedCosts.join(', ')}`,
+        icon: <AlertCircle className="text-amber-500" />
+      };
+    }
+    
+    return { 
+      text: "Pagando despesas de rua...", 
+      icon: <AlertCircle className="text-amber-500" /> 
+    };
+  }, [totals.progress, totals.unpaidFixedCosts]);
+
+  const oilStatus = useMemo(() => {
+    if (!nextOilChange) return null;
+    const remaining = nextOilChange - currentKm;
+    const percent = Math.max(0, Math.min(100, (remaining / 10000) * 100));
+    return { remaining, percent };
+  }, [nextOilChange, currentKm]);
+
+  const kmProgress = useMemo(() => {
+    if (!targetKm || targetKm <= 0) return null;
+    const percent = Math.min(100, (currentKm / targetKm) * 100);
+    return { percent };
+  }, [currentKm, targetKm]);
+
+  const fuelCyclesSummary = useMemo(() => {
+    return getAllEmptyTankCycles(entries, categories as any);
+  }, [entries, categories]);
+
+  const maintenanceStatus = useMemo(() => {
+    return maintenanceIntervals.map(interval => {
+      // Find the last entry for this maintenance item
+      const lastEntry = entries.find(e => {
+        const cat = categories.find(c => c.id === e.categoriaId);
+        const name = cat?.nome.toLowerCase() || '';
+        const itemName = interval.item.toLowerCase();
+        
+        // Match by category name or if the item is "Troca de Óleo" match "Troca de oleo"
+        if (itemName.includes('óleo') || itemName.includes('oleo')) {
+          return (name === 'troca de oleo' || name === 'troca de óleo') && e.km;
+        }
+        
+        return name.includes(itemName) && e.km;
+      });
+
+      if (!lastEntry || !lastEntry.km) return { ...interval, remaining: null, percent: 0 };
+
+      const nextChange = lastEntry.km + interval.intervaloKm;
+      const remaining = nextChange - currentKm;
+      const percent = Math.max(0, Math.min(100, (remaining / interval.intervaloKm) * 100));
+      
+      return { ...interval, remaining, percent, lastKm: lastEntry.km };
+    });
+  }, [maintenanceIntervals, entries, categories, currentKm]);
+
+  const maintenanceSummary = useMemo(() => {
+    const critical = maintenanceStatus.filter(item => item.remaining !== null && item.remaining < 500).length;
+    const warning = maintenanceStatus.filter(item => item.remaining !== null && item.remaining >= 500 && item.remaining < 1500).length;
+    return { critical, warning };
+  }, [maintenanceStatus]);
+
+  const formatCurrency = (value: number) => {
+    return new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(value);
+  };
+
+  const dailyGoalData = useMemo(() => {
+    const now = new Date();
+    const daysInMonth = new Date(now.getFullYear(), now.getMonth() + 1, 0).getDate();
+    
+    // Daily Fixed Cost (Amortized)
+    const dailyFixed = totals.totalFixedCosts / daysInMonth;
+    
+    // Today's actual expenses
+    const todayExpenses = totals.todayExpenses || 0;
+    const todayEarnings = totals.todayEarnings || 0;
+    
+    // Suggested Target: Fixed Cost amortized + Today's real expenses + 10% Profit
+    const suggestedTarget = Math.max(50, Math.round(((dailyFixed + todayExpenses) * 1.1) * 100) / 100);
+    
+    const hasCustomGoal = typeof dailyEarningGoal === 'number' && dailyEarningGoal > 0;
+    const target = hasCustomGoal ? dailyEarningGoal : suggestedTarget;
+    
+    const remainingToday = Math.max(0, target - todayEarnings);
+    const surplusToday = Math.max(0, todayEarnings - target);
+    const percentToday = target > 0 ? (todayEarnings / target) * 100 : 0;
+    const todayProfit = todayEarnings - todayExpenses;
+    const isGoalMet = target > 0 && todayEarnings >= target;
+    
+    return { 
+      target, 
+      suggestedTarget, 
+      hasCustomGoal, 
+      remainingToday, 
+      surplusToday, 
+      percentToday, 
+      dailyFixed, 
+      todayExpenses, 
+      todayProfit,
+      isGoalMet 
+    };
+  }, [totals.totalFixedCosts, totals.todayExpenses, totals.todayEarnings, dailyEarningGoal]);
+
+  const handleOpenGoalModal = () => {
+    setGoalInput(dailyEarningGoal && dailyEarningGoal > 0 ? dailyEarningGoal.toString() : '');
+    setSaveGoalSuccess(false);
+    setIsGoalModalOpen(true);
+  };
+
+  const handleSaveGoal = async (valueToSave?: number) => {
+    const rawVal = valueToSave !== undefined ? valueToSave : parseFloat(goalInput.replace(',', '.'));
+    const cleanVal = isNaN(rawVal) || rawVal < 0 ? 0 : Math.round(rawVal * 100) / 100;
+    
+    setIsSavingGoal(true);
+    try {
+      if (onUpdateDailyEarningGoal) {
+        await onUpdateDailyEarningGoal(cleanVal);
+      }
+      setSaveGoalSuccess(true);
+      setTimeout(() => {
+        setIsGoalModalOpen(false);
+        setSaveGoalSuccess(false);
+      }, 600);
+    } catch (err) {
+      console.error('Erro ao salvar meta diária:', err);
+    } finally {
+      setIsSavingGoal(false);
+    }
+  };
+
+  const GOAL_PRESETS = [150, 200, 250, 300, 350, 400, 500];
+
+  const handleShare = async () => {
+    const shareData = {
+      title: 'LucroNoVolante',
+      text: 'Estou usando o LucroNoVolante para gerir meus ganhos como motorista. Recomendo!',
+      url: window.location.origin
+    };
+
+    try {
+      if (navigator.share) {
+        await navigator.share(shareData);
+      } else {
+        await navigator.clipboard.writeText(window.location.origin);
+        alert('Link copiado para a área de transferência!');
+      }
+    } catch (err) {
+      console.error('Erro ao compartilhar:', err);
+    }
+  };
+
+  return (
+    <div className="space-y-6">
+      {/* Welcome Card for New Users */}
+      {isNewUser && (
+        <div className="bg-gradient-to-r from-blue-600 to-blue-800 text-white p-6 rounded-3xl shadow-xl shadow-blue-900/40 border border-blue-400/20">
+          <div className="flex items-center gap-4 mb-4">
+            <div className="p-3 bg-white/20 rounded-2xl">
+              <Sparkles className="text-white size-7" />
+            </div>
+            <div>
+              <h2 className="text-xl font-black tracking-tight text-black">Bem-vindo ao LucroNoVolante!</h2>
+              <p className="text-blue-100 text-sm opacity-90">Vamos configurar seu painel para começar a lucrar mais.</p>
+            </div>
+          </div>
+          <div className="space-y-3 mb-6 text-sm text-blue-50">
+            <p className="flex items-center gap-2"><PlusCircle size={16} /> 1. Configure seus <span className="font-bold underline">Custos Fixos</span> no menu de configurações.</p>
+            <p className="flex items-center gap-2"><PlusCircle size={16} /> 2. Faça seus primeiros <span className="font-bold underline">lançamentos de ganhos e gastos</span>.</p>
+          </div>
+        </div>
+      )}
+      
+      {/* Share App & Marketing Buttons */}
+      <div className={cn("grid gap-3", isAdmin ? "grid-cols-2" : "grid-cols-1")}>
+        <button 
+          onClick={handleShare}
+          className="py-4 bg-white text-[#0047AB] rounded-3xl font-bold flex items-center justify-center gap-3 shadow-lg shadow-black/20 active:scale-95 transition-all"
+        >
+          <Share2 size={18} className="text-blue-600" />
+          Indicar App
+        </button>
+        {isAdmin && (
+          <button 
+            onClick={onOpenAIStudio}
+            className="py-4 bg-blue-600 text-white rounded-3xl font-bold flex items-center justify-center gap-3 shadow-lg shadow-blue-900/40 active:scale-95 transition-all"
+          >
+            <Sparkles size={18} className="text-blue-200" />
+            Criar Propaganda
+          </button>
+        )}
+      </div>
+
+
+      {/* Daily Goal Card (Prominent & Customizable) */}
+      <div className="bg-white/10 backdrop-blur-md p-6 rounded-3xl shadow-xl border border-white/10 overflow-hidden relative">
+        <div className="absolute top-0 right-0 p-8 opacity-5 pointer-events-none">
+          <Target size={140} className="text-white" />
+        </div>
+        
+        <div className="relative z-10">
+          {/* Header */}
+          <div className="flex flex-wrap items-center justify-between gap-3 mb-6">
+            <div className="flex items-center gap-3">
+              <div className="p-2.5 bg-white rounded-2xl shadow-lg shadow-blue-900/20">
+                <Target className="text-blue-600 size-5" />
+              </div>
+              <div>
+                <div className="flex items-center gap-2">
+                  <h3 className="font-black text-white text-lg tracking-tight">Meta de Ganho Diário</h3>
+                  {dailyGoalData.hasCustomGoal ? (
+                    <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-emerald-500/20 text-emerald-300 border border-emerald-500/30">
+                      Personalizada
+                    </span>
+                  ) : (
+                    <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-blue-500/20 text-blue-300 border border-blue-400/20">
+                      Sugerida (Custos)
+                    </span>
+                  )}
+                </div>
+                <p className="text-[10px] font-black text-blue-200 uppercase tracking-[0.15em] opacity-80">
+                  {dailyGoalData.hasCustomGoal 
+                    ? "Definida por você para o dia de hoje"
+                    : "Custo Fixo Rateado + Despesas de Rua + 10% Lucro"}
+                </p>
+              </div>
+            </div>
+
+            <div className="flex items-center gap-2">
+              <button
+                onClick={handleOpenGoalModal}
+                className="px-3.5 py-1.5 bg-white/15 hover:bg-white/25 border border-white/20 rounded-2xl text-xs font-bold text-white flex items-center gap-1.5 transition-all active:scale-95 shadow-sm"
+                title="Definir ou ajustar meta diária"
+              >
+                <Edit3 size={13} className="text-blue-200" />
+                <span>{dailyGoalData.hasCustomGoal ? "Ajustar Meta" : "Definir Meta"}</span>
+              </button>
+
+              <span className={cn(
+                "text-xs font-black px-3 py-1 rounded-full border",
+                dailyGoalData.isGoalMet 
+                  ? "bg-emerald-500/20 text-emerald-300 border-emerald-500/30" 
+                  : "bg-blue-500/20 text-blue-300 border-blue-400/20"
+              )}>
+                {dailyGoalData.percentToday.toFixed(0)}%
+              </span>
+            </div>
+          </div>
+
+          {/* Metrics Grid */}
+          <div className="grid grid-cols-2 sm:grid-cols-4 gap-4 mb-4">
+            <div className="p-3 bg-white/5 rounded-2xl border border-white/5">
+              <p className="text-[10px] font-black text-blue-200 uppercase tracking-[0.15em] mb-1 opacity-80">Ganhos de Hoje</p>
+              <p className="text-2xl font-black text-white tracking-tighter">
+                {formatCurrency(totals.todayEarnings)}
+              </p>
+              <p className="text-[9px] text-blue-200/70 font-medium mt-0.5">Total faturado</p>
+            </div>
+
+            <div 
+              onClick={handleOpenGoalModal}
+              className="p-3 bg-white/5 rounded-2xl border border-white/5 cursor-pointer hover:bg-white/10 transition-colors group"
+              title="Clique para alterar a meta"
+            >
+              <div className="flex items-center justify-between">
+                <p className="text-[10px] font-black text-blue-200 uppercase tracking-[0.15em] mb-1 opacity-80">Meta Diária</p>
+                <Edit3 size={11} className="text-blue-300/60 group-hover:text-blue-200 transition-colors" />
+              </div>
+              <p className="text-2xl font-black text-blue-300 tracking-tighter">
+                {formatCurrency(dailyGoalData.target)}
+              </p>
+              <p className="text-[9px] text-blue-200/70 font-medium mt-0.5">
+                {dailyGoalData.hasCustomGoal ? "Meta fixada" : "Meta sugerida"}
+              </p>
+            </div>
+
+            <div className="p-3 bg-white/5 rounded-2xl border border-white/5">
+              <p className={cn(
+                "text-[10px] font-black uppercase tracking-[0.15em] mb-1",
+                dailyGoalData.isGoalMet ? "text-emerald-300" : "text-blue-200"
+              )}>
+                {dailyGoalData.isGoalMet ? "Superávit Meta" : "Falta p/ Meta"}
+              </p>
+              <p className={cn(
+                "text-2xl font-black tracking-tighter",
+                dailyGoalData.isGoalMet ? "text-emerald-400" : "text-white"
+              )}>
+                {dailyGoalData.isGoalMet 
+                  ? `+${formatCurrency(dailyGoalData.surplusToday)}` 
+                  : formatCurrency(dailyGoalData.remainingToday)}
+              </p>
+              <p className="text-[9px] text-blue-200/70 font-medium mt-0.5">
+                {dailyGoalData.isGoalMet ? "Meta superada!" : "Para bater o objetivo"}
+              </p>
+            </div>
+
+            <div className="p-3 bg-white/5 rounded-2xl border border-white/5">
+              <p className={cn(
+                "text-[10px] font-black uppercase tracking-[0.15em] mb-1",
+                dailyGoalData.todayProfit >= 0 ? "text-emerald-400" : "text-rose-400"
+              )}>
+                {dailyGoalData.todayProfit >= 0 ? "Lucro de Hoje" : "Prejuízo do Dia"}
+              </p>
+              <p className={cn(
+                "text-2xl font-black tracking-tighter",
+                dailyGoalData.todayProfit >= 0 ? "text-emerald-400" : "text-rose-400"
+              )}>
+                {formatCurrency(Math.abs(dailyGoalData.todayProfit))}
+              </p>
+              <p className="text-[9px] text-blue-200/70 font-medium mt-0.5">
+                Ganhos - Gastos ({formatCurrency(totals.todayExpenses)})
+              </p>
+            </div>
+          </div>
+
+          {/* Progress Bar */}
+          <div className="space-y-3">
+            <div className="h-4 bg-white/10 rounded-full overflow-hidden border border-white/10 p-0.5 relative">
+              <motion.div 
+                initial={{ width: 0 }}
+                animate={{ width: `${Math.min(100, dailyGoalData.percentToday)}%` }}
+                className={cn(
+                  "h-full rounded-full shadow-sm transition-all duration-1000",
+                  dailyGoalData.isGoalMet 
+                    ? "bg-gradient-to-r from-emerald-500 to-teal-300 shadow-[0_0_12px_rgba(16,185,129,0.5)]" 
+                    : dailyGoalData.percentToday >= 70
+                      ? "bg-gradient-to-r from-blue-500 to-emerald-400"
+                      : "bg-gradient-to-r from-blue-500 to-cyan-400"
+                )}
+              />
+            </div>
+            
+            {/* Dynamic Status Banner */}
+            <div className="flex flex-wrap justify-between items-center gap-2 pt-1">
+              <div className="flex items-center gap-2">
+                <span className="text-xs font-bold text-blue-100">
+                  {dailyGoalData.isGoalMet ? (
+                    <span className="text-emerald-300 font-extrabold flex items-center gap-1.5">
+                      🎉 Parabéns! Meta diária atingida! Faturamento extra de {formatCurrency(dailyGoalData.surplusToday)}.
+                    </span>
+                  ) : (
+                    <span>
+                      Faltam <strong className="text-white font-black">{formatCurrency(dailyGoalData.remainingToday)}</strong> ({Math.max(0, 100 - dailyGoalData.percentToday).toFixed(0)}%) para bater a meta de {formatCurrency(dailyGoalData.target)}.
+                    </span>
+                  )}
+                </span>
+              </div>
+
+              <div className="flex items-center gap-3">
+                <button
+                  onClick={handleOpenGoalModal}
+                  className="text-[11px] font-bold text-blue-200 hover:text-white underline decoration-blue-300/40 hover:decoration-white transition-all flex items-center gap-1"
+                >
+                  <Sliders size={12} />
+                  Alterar valor (R$)
+                </button>
+              </div>
+            </div>
+
+            {/* Cost Breakdown Footer Chips */}
+            <div className="pt-2 border-t border-white/10 flex flex-wrap items-center justify-between gap-2 text-[10px] text-blue-200/80">
+              <div className="flex flex-wrap items-center gap-3">
+                <span className="flex items-center gap-1">
+                  <span className="size-1.5 rounded-full bg-blue-300/60" />
+                  Custo Fixo Rateado: <strong className="text-white font-bold">{formatCurrency(dailyGoalData.dailyFixed)}</strong>
+                </span>
+                <span className="flex items-center gap-1">
+                  <span className="size-1.5 rounded-full bg-blue-300/60" />
+                  Gastos de Rua Hoje: <strong className="text-white font-bold">{formatCurrency(totals.todayExpenses)}</strong>
+                </span>
+              </div>
+              <span className="italic text-[9px] text-blue-200/60">
+                {dailyGoalData.hasCustomGoal ? "Meta manual ativa" : "Sugestão inteligente do app"}
+              </span>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <PWAInstallButton />
+
+      {/* Status Card */}
+      <div className="bg-white/10 backdrop-blur-md p-5 rounded-3xl shadow-xl border border-white/10">
+        <div className="flex items-center gap-3 mb-4">
+          <div className="p-2.5 bg-blue-500/20 rounded-2xl">
+            <Target className="text-blue-600 size-5" />
+          </div>
+          <h3 className="font-bold text-white">Status do Objetivo</h3>
+        </div>
+        
+        <div className="flex flex-col gap-2 p-4 bg-white/5 rounded-2xl border border-white/5">
+          <div className="flex items-center gap-3">
+            {statusMessage.icon}
+            <span className="font-bold text-white tracking-tight">{statusMessage.text}</span>
+          </div>
+
+          <div className="text-[11px] font-medium space-y-1">
+             {fixedCostDetails.pending.map((p, idx) => (
+                <div key={`p-${idx}`} className="flex justify-between">
+                  <span className="text-blue-300">{p.item}</span>
+                  <span className="text-white font-bold">{formatCurrency(p.valor)}</span>
+                </div>
+             ))}
+             {fixedCostDetails.savings > 0 && (
+                <div className="flex justify-between pt-1 border-t border-white/10">
+                  <span className="text-emerald-400 font-bold">Valor economizado</span>
+                  <span className="text-emerald-400 font-bold">{formatCurrency(fixedCostDetails.savings)}</span>
+                </div>
+             )}
+          </div>
+        </div>
+
+        <div className="mt-6 space-y-2">
+          <div className="flex justify-between text-xs font-bold text-blue-200 uppercase tracking-wider">
+            <span>Progresso da Quitação</span>
+            <span>{formatCurrency(totals.earnings)} / {formatCurrency(totals.totalFixedCosts + totals.dailyExpenses)} ({totals.progress.toFixed(1)}%)</span>
+          </div>
+          <div className="h-4 bg-white/5 rounded-full overflow-hidden border border-white/10 p-0.5">
+            <motion.div 
+              initial={{ width: 0 }}
+              animate={{ width: `${totals.progress}%` }}
+              className={cn(
+                "h-full rounded-full shadow-sm",
+                totals.progress < 100 ? "bg-blue-400" : "bg-emerald-400"
+              )}
+            />
+          </div>
+          <div className="flex justify-between text-[10px] text-blue-300 pt-2 border-t border-white/5">
+             <span>Custo fixo pendente: {formatCurrency(totalPendingFixedCosts)}</span>
+             <span>Despesas de rua: {formatCurrency(totals.dailyExpenses)}</span>
+          </div>
+        </div>
+      </div>
+
+      {/* Maintenance Summary Card */}
+      <div 
+        onClick={onViewMaintenance}
+        className="bg-white/10 backdrop-blur-md p-5 rounded-3xl shadow-xl border border-white/10 cursor-pointer hover:border-white/20 transition-all active:scale-[0.98]"
+      >
+        <div className="flex items-center justify-between mb-4">
+          <div className="flex items-center gap-3">
+            <div className="p-2.5 bg-blue-500/20 rounded-2xl">
+              <Fuel className="text-blue-600 size-5" />
+            </div>
+            <h3 className="font-bold text-white">Manutenção e Revisão</h3>
+          </div>
+          <ChevronRight size={20} className="text-white/30" />
+        </div>
+
+        <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+          <div className={cn(
+            "p-4 rounded-2xl border flex flex-col gap-1",
+            maintenanceSummary.critical > 0 ? "bg-rose-500/20 border-rose-500/30" : "bg-white/5 border-white/5"
+          )}>
+            <span className={cn(
+              "text-2xl font-black",
+              maintenanceSummary.critical > 0 ? "text-rose-400" : "text-white/30"
+            )}>
+              {maintenanceSummary.critical}
+            </span>
+            <span className="text-[10px] font-bold text-blue-200 uppercase tracking-wider">Críticos</span>
+          </div>
+          <div className={cn(
+            "p-4 rounded-2xl border flex flex-col gap-1",
+            maintenanceSummary.warning > 0 ? "bg-amber-500/20 border-amber-500/30" : "bg-white/5 border-white/5"
+          )}>
+            <span className={cn(
+              "text-2xl font-black",
+              maintenanceSummary.warning > 0 ? "text-amber-400" : "text-white/30"
+            )}>
+              {maintenanceSummary.warning}
+            </span>
+            <span className="text-[10px] font-bold text-blue-200 uppercase tracking-wider">Atenção</span>
+          </div>
+        </div>
+
+        <p className="text-[10px] text-blue-200 mt-4 font-medium flex items-center gap-1">
+          <Info size={12} /> Clique para ver o detalhamento completo de todos OS itens.
+        </p>
+      </div>
+
+      {/* Mileage Goal Status */}
+      {targetKm > 0 && (
+        <div className="bg-white/10 backdrop-blur-md p-5 rounded-3xl shadow-xl border border-white/10">
+          <div className="flex items-center justify-between mb-4">
+            <div className="flex items-center gap-3">
+              <div className="p-2.5 bg-transparent rounded-2xl">
+                <img 
+                  src="https://i.postimg.cc/XY3C4qHn/Designer.jpg" 
+                  alt="Logo" 
+                  className="size-6 rounded-lg"
+                  referrerPolicy="no-referrer"
+                />
+              </div>
+              <h3 className="font-bold text-white">Meta de Kilometragem</h3>
+            </div>
+            <div className="text-right">
+              <span className="text-[10px] font-black text-blue-300 uppercase bg-blue-500/20 px-2 py-1 rounded-lg">
+                {kmProgress?.percent.toFixed(1)}%
+              </span>
+            </div>
+          </div>
+          
+          <div className="flex justify-between items-end mb-2">
+            <div>
+              <p className="text-[10px] font-black text-blue-200 uppercase tracking-[0.15em] mb-1 opacity-70">Progresso</p>
+              <p className="text-2xl font-black text-white tracking-tight">
+                {currentKm} <span className="text-sm text-blue-300 font-black">/ {targetKm} km</span>
+              </p>
+            </div>
+          </div>
+
+          <div className="h-3 bg-white/5 rounded-full overflow-hidden border border-white/10 p-0.5">
+            <motion.div 
+              initial={{ width: 0 }}
+              animate={{ width: `${kmProgress?.percent}%` }}
+              className="h-full rounded-full shadow-sm bg-blue-400"
+            />
+          </div>
+          <p className="text-[10px] text-blue-200 mt-2 font-medium">
+            {currentKm >= targetKm 
+              ? "🎉 Meta de kilometragem atingida!" 
+              : `Faltam ${targetKm - currentKm} km para atingir sua meta mensal.`}
+          </p>
+        </div>
+      )}
+
+      {/* Autonomia & Consumo Real (Tanque Vazio) */}
+      {fuelCyclesSummary.cycles.length > 0 && (() => {
+        const lastCycle = fuelCyclesSummary.cycles[fuelCyclesSummary.cycles.length - 1];
+        return (
+          <div className="bg-gradient-to-br from-amber-500/20 via-slate-900/40 to-slate-900/60 backdrop-blur-md p-5 rounded-3xl shadow-xl border border-amber-500/30 space-y-4">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-3">
+                <div className="p-2.5 bg-amber-500/20 text-amber-400 rounded-2xl border border-amber-500/30">
+                  <Fuel size={22} />
+                </div>
+                <div>
+                  <h3 className="font-bold text-white text-base">Consumo Real (Tanque Vazio)</h3>
+                  <p className="text-xs text-amber-200/80 font-medium">Medição real entre um tanque vazio e outro</p>
+                </div>
+              </div>
+              <span className="text-[10px] font-black text-amber-300 bg-amber-500/20 px-2.5 py-1 rounded-xl border border-amber-500/30 uppercase tracking-wider">
+                {fuelCyclesSummary.cycles.length} {fuelCyclesSummary.cycles.length === 1 ? 'Ciclo Concluído' : 'Ciclos Concluídos'}
+              </span>
+            </div>
+
+            {/* Último Ciclo */}
+            <div className="bg-white/5 border border-white/10 rounded-2xl p-4 space-y-2.5">
+              <div className="flex justify-between items-center text-xs">
+                <span className="font-black text-amber-300 uppercase tracking-wider text-[10px]">Último Ciclo ({lastCycle.combustivel})</span>
+                <span className="text-blue-200 font-medium text-[11px]">{lastCycle.startDate} ➔ {lastCycle.endDate}</span>
+              </div>
+
+              <div className="grid grid-cols-3 gap-2 text-center pt-1">
+                <div className="p-2 bg-white/5 rounded-xl">
+                  <p className="text-[9px] font-bold text-slate-300 uppercase">Km Rodados</p>
+                  <p className="text-base font-black text-white">+{lastCycle.kmRodados} km</p>
+                </div>
+                <div className="p-2 bg-white/5 rounded-xl">
+                  <p className="text-[9px] font-bold text-slate-300 uppercase">Consumo Real</p>
+                  <p className="text-base font-black text-amber-400">{lastCycle.mediaConsumo.toFixed(2)} <span className="text-[10px] text-slate-300">km/{lastCycle.unit}</span></p>
+                </div>
+                <div className="p-2 bg-white/5 rounded-xl">
+                  <p className="text-[9px] font-bold text-slate-300 uppercase">Custo / Km</p>
+                  <p className="text-base font-black text-emerald-400">{formatCurrency(lastCycle.custoPorKm)}</p>
+                </div>
+              </div>
+            </div>
+
+            {/* Médias por tipo de combustível se houver mais de 1 ciclo */}
+            {fuelCyclesSummary.cycles.length > 1 && (
+              <div className="flex flex-wrap items-center justify-between gap-2 pt-1 text-xs text-blue-200">
+                <span>Total rodado em ciclos: <b className="text-white">+{fuelCyclesSummary.totalKmRodados} km</b></span>
+                <span>Média geral: <b className="text-amber-300">{fuelCyclesSummary.mediaGeralConsumo.toFixed(2)} km/L</b></span>
+              </div>
+            )}
+          </div>
+        );
+      })()}
+
+      {/* Main Stats Grid */}
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+        <StatCard 
+          title="Ganhos Brutos" 
+          value={formatCurrency(totals.earnings)} 
+          icon={<TrendingUp className="text-emerald-400" />}
+          color="emerald"
+          onClick={() => setModalType('ganhos')}
+        />
+        <StatCard 
+          title="Despesas Rua" 
+          value={formatCurrency(totals.dailyExpenses)} 
+          icon={<TrendingDown className="text-rose-400" />}
+          color="rose"
+          onClick={() => setModalType('despesas')}
+        />
+      </div>
+
+      {/* Saldo a Pagar Card */}
+      <div className="bg-white/10 backdrop-blur-md p-5 rounded-3xl shadow-xl border border-white/10">
+        <div className="flex items-center justify-between mb-4">
+          <div className="flex items-center gap-3">
+            <div className="p-2 bg-rose-500/10 rounded-xl">
+              <TrendingDown className="text-rose-400 size-5" />
+            </div>
+            <h3 className="font-bold text-white">Total de Gastos do Mês</h3>
+          </div>
+          <button 
+            onClick={() => setShowDetails(!showDetails)}
+            className="p-2 hover:bg-white/10 rounded-full transition-colors"
+          >
+             <Info className={cn("text-white/50 size-5", showDetails && "text-white")} />
+          </button>
+          <span className="text-lg font-black text-rose-400">{formatCurrency(totals.balanceToPay)}</span>
+        </div>
+        
+        {showDetails && totals.paidFixedCostsDetails && (
+          <div className="mt-4 pt-4 border-t border-white/10 space-y-4">
+            <div className="space-y-1">
+              <div className="flex justify-between text-xs text-blue-200">
+                <span>Total Custos Fixos:</span>
+                <span>{formatCurrency(totals.totalFixedCosts)}</span>
+              </div>
+              <div className="flex justify-between text-xs text-blue-200">
+                <span>Despesas Rua:</span>
+                <span>{formatCurrency(totals.dailyExpenses)}</span>
+              </div>
+            </div>
+            {totals.paidFixedCostsDetails.length > 0 && (
+              <div>
+                <p className="text-[10px] text-blue-200 font-black uppercase mb-2">Custos Fixos Pagos</p>
+                <div className="space-y-1">
+                  {totals.paidFixedCostsDetails.map((pf, idx) => (
+                    <div key={`pf-${pf.item}-${pf.data}-${idx}`} className="flex justify-between text-xs text-emerald-400 font-medium">
+                      <span>{pf.item} ({pf.data.replace(/\//g, '-')})</span>
+                      <span>{formatCurrency(pf.valor)}</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+      </div>
+
+      {dailyWorkBurden !== null && (
+        <div 
+          className="bg-white/10 backdrop-blur-md p-5 rounded-3xl shadow-xl border border-white/10 cursor-pointer"
+          onClick={() => setShowBurdenDetails(!showBurdenDetails)}
+        >
+          <div className="flex items-center justify-between mb-2">
+            <div className="flex items-center gap-3">
+              <div className="p-2 bg-emerald-500/10 rounded-xl">
+                <Target className="text-emerald-400 size-5" />
+              </div>
+              <h3 className="font-bold text-white">Custo Médio p/ Dia</h3>
+            </div>
+            <span className="text-lg font-black text-emerald-400">{formatCurrency(dailyWorkBurden.burden)}</span>
+          </div>
+          <p className="text-[10px] text-blue-200 font-medium leading-tight mb-2">
+            Foram {dailyWorkBurden.days} dias trabalhados esse mês.
+          </p>
+          
+          {showBurdenDetails && (
+            <div className="mt-3 p-3 bg-white/5 rounded-xl text-[10px] text-blue-100 font-mono">
+              <p>Detalhes do cálculo:</p>
+              <p>Custos Fixos Pendentes: {formatCurrency(totalPendingFixedCosts)}</p>
+              <p>+ Despesas de Rua: {formatCurrency(totals.dailyExpenses || 0)}</p>
+              <p>-------------------------</p>
+              <p>= Total: {formatCurrency(totalPendingFixedCosts + (totals.dailyExpenses || 0))}</p>
+              <p>÷ {dailyWorkBurden.days} dias</p>
+            </div>
+          )}
+
+          <p className="text-[10px] text-blue-200 font-medium leading-tight opacity-70 italic mt-2">
+            Clique para ver detalhes do cálculo.
+          </p>
+        </div>
+      )}
+
+      {/* Fixed Costs Summary */}
+      <div className="bg-white/10 backdrop-blur-md p-5 rounded-3xl shadow-xl border border-white/10">
+        <div className="flex items-center gap-3 mb-4">
+          <div className="p-2 bg-white/5 rounded-xl">
+            <Wallet className="text-blue-300 size-5" />
+          </div>
+          <h3 className="font-bold text-white">Custos Fixos do Mês</h3>
+        </div>
+        
+        <div className="space-y-3">
+          {activeFixedCosts.length > 0 ? (
+            activeFixedCosts.map((cost, idx) => {
+              const style = getCategoryStyle(cost.item);
+              const isPaid = totals.paidFixedCostsDetails.some(p => p.item.toLowerCase() === cost.item.toLowerCase());
+              return (
+                <div key={`${cost.id}-${idx}`} className={cn("flex justify-between items-center text-sm p-2 rounded-xl", isPaid && "bg-emerald-900/20")}>
+                  <div className="flex items-center gap-2">
+                    <span className={cn("p-1.5 rounded-lg", "bg-white/5", "text-white")}>
+                      {style.icon}
+                    </span>
+                    <span className={cn("font-medium", isPaid ? "text-emerald-300" : "text-blue-100")}>{cost.item}</span>
+                  </div>
+                  <span className={cn("font-bold", isPaid ? "text-emerald-400" : "text-white")}>{formatCurrency(cost.valorMensal)}</span>
+                </div>
+              );
+            })
+          ) : (
+            <div className="bg-white/5 p-4 rounded-2xl border border-dashed border-white/10 text-center space-y-2">
+              <p className="text-xs font-bold text-blue-200">Nenhum custo fixo cadastrado</p>
+              <p className="text-[10px] text-blue-300 leading-tight">
+                Cadastre seu Aluguel, Seguro e MEI para que possamos calcular seu lucro real.
+              </p>
+            </div>
+          )}
+          <div className="pt-3 border-t border-white/10 flex justify-between items-center">
+            <span className="font-bold text-blue-100">Total Fixo</span>
+            <span className="font-black text-white">{formatCurrency(totals.totalFixedCosts)}</span>
+          </div>
+          
+          <button 
+            onClick={() => setShowPaidDetails(!showPaidDetails)}
+            className="w-full text-xs font-bold text-blue-300 hover:text-white flex items-center justify-center gap-1 pt-2"
+          >
+            {showPaidDetails ? 'Ocultar pagos' : 'Ver custos fixos já pagos'}
+            <ChevronRight className={cn("size-4 transition-transform", showPaidDetails && "rotate-90")} />
+          </button>
+          
+          <AnimatePresence>
+            {showPaidDetails && (
+              <motion.div 
+                initial={{ height: 0, opacity: 0 }}
+                animate={{ height: 'auto', opacity: 1 }}
+                exit={{ height: 0, opacity: 0 }}
+                className="space-y-2 pt-2 border-t border-white/10"
+              >
+                  {totals.paidFixedCostsDetails.map((pf, idx) => (
+                    <div key={`paid-fc-${pf.item}-${idx}`} className="flex justify-between text-xs text-emerald-400 font-medium">
+                      <span>{pf.item} ({pf.data.replace(/\//g, '-')})</span>
+                      <span>{formatCurrency(pf.valor)}</span>
+                    </div>
+                  ))}
+                  {totals.paidFixedCostsDetails.length === 0 && <p className="text-xs text-blue-300 text-center">Nenhum custo fixo pago este mês.</p>}
+              </motion.div>
+            )}
+          </AnimatePresence>
+        </div>
+      </div>
+
+      {/* IRPF 2026 Card */}
+      <div className="bg-indigo-600 p-6 rounded-3xl shadow-2xl text-white cursor-pointer mb-6" onClick={() => setShowBurdenDetails(!showBurdenDetails)}>
+        <div className="flex items-center justify-between mb-2">
+          <h3 className="font-bold text-lg">Carnê-Leão (IRPF 2026)</h3>
+          <Info className={cn("text-white/50 size-5", showBurdenDetails && "text-white")} />
+        </div>
+        
+        <div className="text-sm font-medium opacity-90 mb-4">
+          {(() => {
+            const base = totals.earnings * 0.6;
+            const { tax, bracket } = base > 9000 ? { tax: 800, bracket: "27,5%" } 
+                                : base > 7200 ? { tax: 330, bracket: "22,5%" } 
+                                : base > 6000 ? { tax: 150, bracket: "15%" } 
+                                : base > 5400 ? { tax: 60, bracket: "7,5%" } 
+                                : { tax: 0, bracket: "0%" };
+            return base > 5000 
+              ? <span className="text-rose-200 font-bold">⚠️ Atenção: Alíquota {bracket} | Est. {formatCurrency(tax)}</span>
+              : <span className="text-emerald-200 font-bold block">😊 Isento este mês. <span className="text-white/80 font-normal block text-[10px]">Aconselhável declarar rendimento.</span></span>;
+          })()}
+        </div>
+
+        <div className="text-3xl font-black tracking-tighter">
+          {formatCurrency(totals.earnings * 0.6)}
+        </div>
+        <p className="text-xs opacity-70 font-medium">Base Tributável (60% dos ganhos)</p>
+
+        {showBurdenDetails && (
+          <div className="mt-4 pt-4 border-t border-white/20 space-y-2 text-white text-xs">
+            <div className="flex justify-between">
+              <span>Ganhos Totais:</span>
+              <span className="font-bold">{formatCurrency(totals.earnings)}</span>
+            </div>
+            {totals.earnings * 0.6 > 5000 && (
+              <div className="mt-2 p-2 bg-rose-700/50 rounded-lg">
+                <p className="font-bold">Ação próxima:</p>
+                <p>Acesse o e-CAC e lance R$ {formatCurrency(totals.earnings * 0.6)}</p>
+              </div>
+            )}
+          </div>
+        )}
+      </div>
+
+      {/* Net Profit Card */}
+      <div className={cn(
+        "p-6 rounded-3xl shadow-2xl text-white transition-colors duration-500",
+        totals.balance >= 0 ? "bg-emerald-600 shadow-emerald-900/20" : "bg-rose-600 shadow-rose-900/20"
+      )}>
+        <div className="flex justify-between items-start mb-4">
+          <div>
+            <p className="text-xs font-bold uppercase tracking-widest opacity-80 mb-1">Lucro Real Estimado</p>
+            <h2 className="text-4xl font-black tracking-tighter">
+              {formatCurrency(totals.balance)}
+            </h2>
+          </div>
+          <div className="text-right bg-white/20 backdrop-blur-md p-3 rounded-2xl border border-white/20">
+            <p className="text-[9px] font-black uppercase tracking-wider opacity-90 mb-1">Meta Diária Sugerida</p>
+            <p className="text-xl font-black">{formatCurrency(dailyGoalData.target)}</p>
+            <p className="text-[8px] font-bold opacity-70 mt-1">Custo + 10% Lucro</p>
+          </div>
+        </div>
+        <p className="text-[10px] font-medium opacity-70 leading-tight">
+          * Valor calculado subtraindo despesas de rua e custos fixos totais dos ganhos brutos. 
+          A meta diária considera seus custos fixos mensais, média de gastos diários e margem de 10%.
+        </p>
+        <div className="mt-4 border-t border-white/10 pt-4 flex flex-col sm:flex-row justify-between items-start sm:items-center gap-2">
+          <div className="text-[10px] text-white/50">
+            Cálculo tributário disponível abaixo.
+          </div>
+          <a href="mailto:lucronovolanteapp@gmail.com" className="text-xs font-bold text-blue-200 hover:text-white transition-colors flex items-center gap-1">
+            Dúvidas/Suporte: lucronovolanteapp@gmail.com
+          </a>
+        </div>
+      </div>
+
+      <AnimatePresence>
+        {modalType && (
+          <div className="fixed inset-0 z-[100] flex items-end sm:items-center justify-center p-4">
+            <motion.div 
+              initial={{ opacity: 0 }} 
+              animate={{ opacity: 1 }} 
+              exit={{ opacity: 0 }} 
+              onClick={() => setModalType(null)} 
+              className="absolute inset-0 bg-slate-900/60 backdrop-blur-sm" 
+            />
+            <motion.div 
+              initial={{ y: "100%" }} 
+              animate={{ y: 0 }} 
+              exit={{ y: "100%" }} 
+              className="relative bg-white w-full max-w-md max-h-[80vh] rounded-t-3xl sm:rounded-3xl overflow-hidden shadow-2xl flex flex-col"
+            >
+              <div className="p-5 border-b border-slate-100 flex justify-between items-center bg-slate-50">
+                <div className="flex items-center gap-3">
+                  <div className={cn(
+                    "p-2 rounded-xl",
+                    modalType === 'ganhos' ? "bg-emerald-50 text-emerald-600" : "bg-rose-50 text-rose-600"
+                  )}>
+                    {modalType === 'ganhos' ? <TrendingUp size={20} /> : <TrendingDown size={20} />}
+                  </div>
+                  <h2 className="font-bold text-slate-800 text-lg tracking-tight">
+                    {modalType === 'ganhos' ? 'Ganhos Brutos do Mês' : 'Despesas de Rua do Mês'}
+                  </h2>
+                </div>
+                <button 
+                  onClick={() => setModalType(null)}
+                  className="p-2 text-slate-400 hover:text-slate-600 hover:bg-slate-100 rounded-full transition-colors"
+                >
+                  <X size={20} />
+                </button>
+              </div>
+              <div className="p-5 overflow-y-auto space-y-3 bg-white">
+                {detailsList.length > 0 ? (
+                  <div className="space-y-3">
+                    {detailsList.map((item, idx) => (
+                      <div key={`detail-${item.name}-${idx}`} className="flex justify-between items-center p-3 rounded-2xl border border-slate-100 bg-slate-50/50">
+                        <span className="font-bold text-slate-700">{item.name}</span>
+                        <span className={cn(
+                          "font-black text-lg",
+                          modalType === 'ganhos' ? "text-emerald-600" : "text-rose-600"
+                        )}>
+                          {formatCurrency(item.total)}
+                        </span>
+                      </div>
+                    ))}
+                    <div className="pt-4 border-t border-slate-100 flex justify-between items-center">
+                      <span className="font-black text-slate-400 uppercase tracking-widest text-xs">Total Parcial</span>
+                      <span className={cn(
+                        "font-black text-xl",
+                        modalType === 'ganhos' ? "text-emerald-600" : "text-rose-600"
+                      )}>
+                        {formatCurrency(detailsList.reduce((acc, item) => acc + item.total, 0))}
+                      </span>
+                    </div>
+                  </div>
+                ) : (
+                  <div className="text-center py-8 text-slate-400">
+                    <p className="font-bold">Nenhum registro encontrado</p>
+                    <p className="text-sm">Os lançamentos deste mês aparecerão aqui.</p>
+                  </div>
+                )}
+              </div>
+            </motion.div>
+          </div>
+        )}
+
+        {/* Modal de Definição de Meta Diária */}
+        {isGoalModalOpen && (
+          <div className="fixed inset-0 bg-black/60 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+            <motion.div 
+              initial={{ opacity: 0, scale: 0.95, y: 15 }}
+              animate={{ opacity: 1, scale: 1, y: 0 }}
+              exit={{ opacity: 0, scale: 0.95, y: 15 }}
+              className="bg-white rounded-3xl max-w-md w-full shadow-2xl overflow-hidden border border-slate-100 flex flex-col max-h-[92vh]"
+            >
+              {/* Modal Header */}
+              <div className="p-5 border-b border-slate-100 flex items-center justify-between bg-gradient-to-r from-blue-50 to-indigo-50/50">
+                <div className="flex items-center gap-3">
+                  <div className="p-2.5 bg-blue-600 text-white rounded-2xl shadow-md shadow-blue-600/30">
+                    <Target size={22} />
+                  </div>
+                  <div>
+                    <h2 className="font-black text-slate-800 text-lg tracking-tight">
+                      Meta de Ganho Diário
+                    </h2>
+                    <p className="text-xs text-slate-500 font-medium">
+                      Defina quanto planeja faturar hoje
+                    </p>
+                  </div>
+                </div>
+                <button 
+                  onClick={() => setIsGoalModalOpen(false)}
+                  className="p-2 text-slate-400 hover:text-slate-600 hover:bg-white rounded-full transition-colors"
+                >
+                  <X size={20} />
+                </button>
+              </div>
+
+              {/* Modal Body */}
+              <div className="p-5 overflow-y-auto space-y-5 bg-white">
+                {/* Live Comparison Card */}
+                <div className="bg-slate-50 p-4 rounded-2xl border border-slate-150 space-y-3">
+                  <div className="flex justify-between items-center">
+                    <span className="text-xs font-bold text-slate-500">Ganhos de Hoje (Faturado):</span>
+                    <span className="text-lg font-black text-emerald-600">
+                      {formatCurrency(totals.todayEarnings)}
+                    </span>
+                  </div>
+
+                  {/* Simulated Progress */}
+                  {(() => {
+                    const parsed = parseFloat(goalInput.replace(',', '.')) || (dailyGoalData.hasCustomGoal ? dailyGoalData.target : dailyGoalData.suggestedTarget);
+                    const simulatedPercent = parsed > 0 ? (totals.todayEarnings / parsed) * 100 : 0;
+                    const simulatedRemaining = Math.max(0, parsed - totals.todayEarnings);
+                    const isMet = totals.todayEarnings >= parsed && parsed > 0;
+
+                    return (
+                      <div className="pt-2 border-t border-slate-200/60 space-y-2">
+                        <div className="flex justify-between items-center text-xs">
+                          <span className="font-bold text-slate-600">
+                            Progresso com esta meta:
+                          </span>
+                          <span className={cn(
+                            "font-black px-2 py-0.5 rounded-full text-[11px]",
+                            isMet ? "bg-emerald-100 text-emerald-700" : "bg-blue-100 text-blue-700"
+                          )}>
+                            {simulatedPercent.toFixed(0)}%
+                          </span>
+                        </div>
+
+                        <div className="h-2.5 bg-slate-200 rounded-full overflow-hidden">
+                          <div 
+                            style={{ width: `${Math.min(100, simulatedPercent)}%` }}
+                            className={cn(
+                              "h-full rounded-full transition-all duration-300",
+                              isMet ? "bg-emerald-500" : "bg-blue-600"
+                            )}
+                          />
+                        </div>
+
+                        <p className="text-[11px] text-slate-500 font-medium">
+                          {isMet ? (
+                            <span className="text-emerald-600 font-bold">
+                              🎉 Meta batida! Você já superou esta meta em {formatCurrency(totals.todayEarnings - parsed)}.
+                            </span>
+                          ) : (
+                            <span>
+                              Faltam <strong className="text-slate-800 font-bold">{formatCurrency(simulatedRemaining)}</strong> para atingir este objetivo hoje.
+                            </span>
+                          )}
+                        </p>
+                      </div>
+                    );
+                  })()}
+                </div>
+
+                {/* Input Field */}
+                <div className="space-y-2">
+                  <label className="text-xs font-black text-slate-700 uppercase tracking-wider block">
+                    Valor da Meta Diária (R$)
+                  </label>
+                  <div className="relative">
+                    <div className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-400 font-black text-lg">
+                      R$
+                    </div>
+                    <input 
+                      type="number"
+                      step="1"
+                      min="0"
+                      value={goalInput}
+                      onChange={(e) => setGoalInput(e.target.value)}
+                      placeholder={dailyGoalData.suggestedTarget.toFixed(2)}
+                      className="w-full bg-slate-50 border-2 border-slate-200 focus:border-blue-600 rounded-2xl py-3.5 pl-12 pr-4 text-xl font-black text-slate-800 focus:outline-none focus:ring-4 focus:ring-blue-500/10 transition-all"
+                      autoFocus
+                    />
+                    {goalInput && (
+                      <button
+                        type="button"
+                        onClick={() => setGoalInput('')}
+                        className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600 p-1"
+                      >
+                        <X size={16} />
+                      </button>
+                    )}
+                  </div>
+                  <p className="text-[11px] text-slate-400">
+                    Defina o valor bruto total que você pretende atingir nas corridas de hoje.
+                  </p>
+                </div>
+
+                {/* Quick Presets */}
+                <div className="space-y-2">
+                  <span className="text-[11px] font-black text-slate-500 uppercase tracking-wider block">
+                    Valores Rápidos:
+                  </span>
+                  <div className="grid grid-cols-4 gap-2">
+                    {GOAL_PRESETS.map((preset) => {
+                      const isSelected = goalInput === preset.toString();
+                      return (
+                        <button
+                          key={`preset-${preset}`}
+                          type="button"
+                          onClick={() => setGoalInput(preset.toString())}
+                          className={cn(
+                            "py-2 px-1 rounded-xl text-xs font-black border transition-all active:scale-95 text-center",
+                            isSelected 
+                              ? "bg-blue-600 text-white border-blue-600 shadow-md shadow-blue-600/30" 
+                              : "bg-slate-50 text-slate-700 border-slate-200 hover:bg-slate-100 hover:border-slate-300"
+                          )}
+                        >
+                          R$ {preset}
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+
+                {/* Suggestion based on costs */}
+                <div className="p-3.5 rounded-2xl bg-blue-50/70 border border-blue-100 space-y-2">
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center gap-1.5 text-blue-700 font-bold text-xs">
+                      <Sparkles size={14} className="text-blue-600" />
+                      <span>Sugestão Automática de Custos:</span>
+                    </div>
+                    <span className="font-black text-blue-800 text-sm">
+                      {formatCurrency(dailyGoalData.suggestedTarget)}
+                    </span>
+                  </div>
+                  <p className="text-[10px] text-blue-600/80 leading-relaxed">
+                    Cobre seus custos fixos do dia ({formatCurrency(dailyGoalData.dailyFixed)}) + gastos de rua de hoje ({formatCurrency(dailyGoalData.todayExpenses)}) + margem de 10% de lucro.
+                  </p>
+                  <button
+                    type="button"
+                    onClick={() => setGoalInput(dailyGoalData.suggestedTarget.toFixed(2))}
+                    className="w-full py-2 bg-blue-100 hover:bg-blue-200 text-blue-800 rounded-xl text-xs font-bold transition-all active:scale-95 flex items-center justify-center gap-1.5"
+                  >
+                    <Zap size={13} />
+                    Usar Sugestão de {formatCurrency(dailyGoalData.suggestedTarget)}
+                  </button>
+                </div>
+              </div>
+
+              {/* Modal Footer */}
+              <div className="p-4 border-t border-slate-100 bg-slate-50 flex items-center justify-between gap-3">
+                {dailyGoalData.hasCustomGoal ? (
+                  <button
+                    type="button"
+                    onClick={() => handleSaveGoal(0)}
+                    disabled={isSavingGoal}
+                    className="text-xs font-bold text-slate-500 hover:text-rose-600 underline transition-colors flex items-center gap-1"
+                  >
+                    <RotateCcw size={13} />
+                    Restaurar Sugerida
+                  </button>
+                ) : (
+                  <button
+                    type="button"
+                    onClick={() => setIsGoalModalOpen(false)}
+                    className="px-4 py-2.5 text-xs font-bold text-slate-600 hover:bg-slate-200 rounded-xl transition-colors"
+                  >
+                    Cancelar
+                  </button>
+                )}
+
+                <div className="flex items-center gap-2 ml-auto">
+                  <button
+                    type="button"
+                    onClick={() => setIsGoalModalOpen(false)}
+                    className="px-4 py-2.5 text-xs font-bold text-slate-600 hover:bg-slate-200 rounded-xl transition-colors"
+                  >
+                    Fechar
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => handleSaveGoal()}
+                    disabled={isSavingGoal}
+                    className={cn(
+                      "px-6 py-2.5 text-white font-black text-xs rounded-xl shadow-lg transition-all active:scale-95 flex items-center gap-2",
+                      saveGoalSuccess
+                        ? "bg-emerald-600 shadow-emerald-600/30"
+                        : "bg-blue-600 hover:bg-blue-700 shadow-blue-600/30"
+                    )}
+                  >
+                    {saveGoalSuccess ? (
+                      <>
+                        <Check size={16} />
+                        <span>Salvo!</span>
+                      </>
+                    ) : (
+                      <>
+                        <Check size={16} />
+                        <span>{isSavingGoal ? "Salvando..." : "Salvar Meta"}</span>
+                      </>
+                    )}
+                  </button>
+                </div>
+              </div>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
+    </div>
+  );
+}
+
+function StatCard({ title, value, icon, color, onClick }: { title: string, value: string, icon: ReactNode, color: 'emerald' | 'rose', onClick?: () => void }) {
+  return (
+    <div 
+      onClick={onClick}
+      className={cn(
+        "bg-white/10 backdrop-blur-md p-4 rounded-3xl shadow-xl border border-white/10 flex flex-col justify-center",
+        onClick && "cursor-pointer hover:bg-white/20 active:scale-95 transition-all"
+      )}
+    >
+      <div className={cn(
+        "p-2 rounded-xl w-fit mb-3",
+        color === 'emerald' ? "bg-emerald-500/20" : "bg-rose-500/20"
+      )}>
+        {icon}
+      </div>
+      <p className="text-[10px] font-bold text-blue-200 uppercase tracking-wider mb-1">{title}</p>
+      <p className="text-lg font-black text-white tracking-tight">{value}</p>
+    </div>
+  );
+}
+

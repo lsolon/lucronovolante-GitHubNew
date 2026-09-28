@@ -1,0 +1,9 @@
+{
+  "name": "LucroNoVolante",
+  "description": "A ferramenta definitiva de gestão financeira para motoristas de aplicativo. Controle seu lucro real, metas diárias e manutenções.",
+  "requestFramePermissions": [
+    "geolocation",
+    "camera"
+  ],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
